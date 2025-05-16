@@ -7,6 +7,8 @@ from glob import glob
 import torch, face_detection
 from models import Wav2Lip
 import platform
+import hashlib
+import pickle
 
 parser = argparse.ArgumentParser(description='Inference code to lip-sync videos in the wild using Wav2Lip models')
 
@@ -65,9 +67,25 @@ def get_smoothened_boxes(boxes, T):
 		boxes[i] = np.mean(window, axis=0)
 	return boxes
 
+def get_cache_key(file_path, static, resize_factor, crop, pads, box):
+	hash_input = f"{file_path}_{static}_{resize_factor}_{crop}_{pads}_{box}"
+	return hashlib.md5(hash_input.encode()).hexdigest()
+
 def face_detect(images):
 	detector = face_detection.FaceAlignment(face_detection.LandmarksType._2D, 
 											flip_input=False, device=device)
+
+	cache_dir = 'cache'
+	os.makedirs(cache_dir, exist_ok=True)
+
+	cache_key = get_cache_key(args.face, args.static, args.resize_factor, args.crop, args.pads, args.box)
+	cache_path = os.path.join(cache_dir, f"{cache_key}.pkl")
+
+	# Try to load from cache
+	if os.path.exists(cache_path):
+		with open(cache_path, 'rb') as f:
+			print("Loaded face detections from cache.")
+			return pickle.load(f)
 
 	batch_size = args.face_det_batch_size
 	
@@ -88,22 +106,28 @@ def face_detect(images):
 	pady1, pady2, padx1, padx2 = args.pads
 	for rect, image in zip(predictions, images):
 		if rect is None:
-			cv2.imwrite('temp/faulty_frame.jpg', image) # check this frame where the face was not detected.
+			cv2.imwrite('temp/faulty_frame.jpg', image)
 			raise ValueError('Face not detected! Ensure the video contains a face in all the frames.')
 
 		y1 = max(0, rect[1] - pady1)
 		y2 = min(image.shape[0], rect[3] + pady2)
 		x1 = max(0, rect[0] - padx1)
 		x2 = min(image.shape[1], rect[2] + padx2)
-		
+
 		results.append([x1, y1, x2, y2])
 
 	boxes = np.array(results)
-	if not args.nosmooth: boxes = get_smoothened_boxes(boxes, T=5)
-	results = [[image[y1: y2, x1:x2], (y1, y2, x1, x2)] for image, (x1, y1, x2, y2) in zip(images, boxes)]
+	if not args.nosmooth:
+		boxes = get_smoothened_boxes(boxes, T=5)
+
+	final_results = [[image[y1:y2, x1:x2], (y1, y2, x1, x2)] for image, (x1, y1, x2, y2) in zip(images, boxes)]
+
+	# Save to cache
+	with open(cache_path, 'wb') as f:
+		pickle.dump(final_results, f)
 
 	del detector
-	return results 
+	return final_results 
 
 def datagen(frames, mels):
 	img_batch, mel_batch, frame_batch, coords_batch = [], [], [], []
